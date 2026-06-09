@@ -60,9 +60,19 @@
         @if (_availabilityReport is not null)
         {
             <MudAlert Class="mt-2" Severity="@(_availabilityReport.Errors.Count > 0 ? Severity.Warning : Severity.Info)" Variant="Variant.Outlined">
-                Fuentes leídas: @_availabilityReport.SourcesFetched. Fuentes omitidas: @_availabilityReport.SourcesSkipped. Reclamos guardados: @_availabilityReport.ClaimsSaved. Reclamos que afectan predicciones: @_availabilityReport.ClaimsAffectingPredictions. Contextos actualizados: @_availabilityReport.ContextRowsUpdated. @string.Join(" ", _availabilityReport.Notes)
+                Fuentes leídas: @_availabilityReport.SourcesFetched. Fuentes omitidas: @_availabilityReport.SourcesSkipped. Reclamos guardados: @_availabilityReport.ClaimsSaved. Reclamos que afectan predicciones: @_availabilityReport.ClaimsAffectingPredictions. Roles matcheados: @_availabilityReport.RoleMatchedClaims. Roles desconocidos: @_availabilityReport.RoleUnknownClaims. Contextos actualizados: @_availabilityReport.ContextRowsUpdated. @string.Join(" ", _availabilityReport.Notes)
             </MudAlert>
             @foreach (var error in _availabilityReport.Errors)
+            {
+                <MudAlert Class="mt-2" Severity="Severity.Warning" Variant="Variant.Outlined">@error</MudAlert>
+            }
+        }
+        @if (_roleReport is not null)
+        {
+            <MudAlert Class="mt-2" Severity="@(_roleReport.Errors.Count > 0 ? Severity.Warning : Severity.Info)" Variant="Variant.Outlined">
+                Enriquecimiento de roles: @_roleReport.RoleMatchedClaims matcheados, @_roleReport.RoleUnknownClaims desconocidos. @string.Join(" ", _roleReport.Notes)
+            </MudAlert>
+            @foreach (var error in _roleReport.Errors)
             {
                 <MudAlert Class="mt-2" Severity="Severity.Warning" Variant="Variant.Outlined">@error</MudAlert>
             }
@@ -113,6 +123,7 @@
     private RankingRefreshReport? _rankingsReport;
     private ApiFootballRefreshReport? _apiReport;
     private AvailabilityRefreshReport? _availabilityReport;
+    private AvailabilityRefreshReport? _roleReport;
     private int _teams;
     private int _fixtures;
     private int _ratings;
@@ -198,6 +209,7 @@
         try
         {
             _availabilityReport = await Availability.RefreshAsync();
+            _roleReport = await Api.EnrichAvailabilityRolesAsync();
             await Load();
             Snackbar.Add(_availabilityReport.Errors.Count > 0 ? "La actualización de disponibilidad terminó con advertencias." : "Disponibilidad actualizada.", _availabilityReport.Errors.Count > 0 ? Severity.Warning : Severity.Success);
         }

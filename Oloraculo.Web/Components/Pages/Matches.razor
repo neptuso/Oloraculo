@@ -115,12 +115,14 @@
                                 <HeaderContent>
                                     <MudTh>Jugador</MudTh>
                                     <MudTh>Equipo</MudTh>
+                                    <MudTh>Rol</MudTh>
                                     <MudTh>Estado</MudTh>
                                     <MudTh>Fuente</MudTh>
                                 </HeaderContent>
                                 <RowTemplate>
                                     <MudTd DataLabel="Jugador">@context.Player</MudTd>
                                     <MudTd DataLabel="Equipo"><TeamLabel TeamId="@context.TeamId" Name="@context.TeamName" Compact="true" /></MudTd>
+                                    <MudTd DataLabel="Rol">@context.Position</MudTd>
                                     <MudTd DataLabel="Estado">
                                         <MudChip T="string" Size="Size.Small" Color="@(context.AffectsPrediction ? Color.Warning : Color.Default)" Variant="Variant.Outlined">@StatusText(context)</MudChip>
                                         @if (!string.IsNullOrWhiteSpace(context.Reason))

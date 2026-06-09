@@ -290,14 +290,36 @@ namespace Oloraculo.Web.Services
                         "SupportingQuote" TEXT NOT NULL,
                         "ObservedDate" TEXT NULL,
                         "AffectsPrediction" INTEGER NOT NULL,
+                        "ApiFootballPlayerId" INTEGER NULL,
+                        "Position" TEXT NOT NULL DEFAULT 'Unknown',
+                        "PositionSource" TEXT NOT NULL DEFAULT 'Unknown',
+                        "PositionMatchedAt" TEXT NULL,
                         "CreatedAt" TEXT NOT NULL
                     )
                     """, ct);
                 await ExecuteSchemaAsync("""CREATE INDEX IF NOT EXISTS "IX_AvailabilityClaims_TeamId_PlayerKey_Status_SourceUrl" ON "AvailabilityClaims" ("TeamId", "PlayerKey", "Status", "SourceUrl")""", ct);
 
+                var claimColumns = await ColumnsAsync("AvailabilityClaims", ct);
+                if (!claimColumns.Contains("ApiFootballPlayerId"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "AvailabilityClaims" ADD COLUMN "ApiFootballPlayerId" INTEGER NULL""", ct);
+                if (!claimColumns.Contains("Position"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "AvailabilityClaims" ADD COLUMN "Position" TEXT NOT NULL DEFAULT 'Unknown'""", ct);
+                if (!claimColumns.Contains("PositionSource"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "AvailabilityClaims" ADD COLUMN "PositionSource" TEXT NOT NULL DEFAULT 'Unknown'""", ct);
+                if (!claimColumns.Contains("PositionMatchedAt"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "AvailabilityClaims" ADD COLUMN "PositionMatchedAt" TEXT NULL""", ct);
+
                 var fixtureColumns = await ColumnsAsync("FixtureContexts", ct);
                 if (fixtureColumns.Count > 0 && !fixtureColumns.Contains("HasAvailabilityNews"))
                     await ExecuteSchemaAsync("""ALTER TABLE "FixtureContexts" ADD COLUMN "HasAvailabilityNews" INTEGER NOT NULL DEFAULT 0""", ct);
+                if (fixtureColumns.Count > 0 && !fixtureColumns.Contains("UnavailableHomeAttackImpact"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "FixtureContexts" ADD COLUMN "UnavailableHomeAttackImpact" REAL NOT NULL DEFAULT 0""", ct);
+                if (fixtureColumns.Count > 0 && !fixtureColumns.Contains("UnavailableHomeDefenseImpact"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "FixtureContexts" ADD COLUMN "UnavailableHomeDefenseImpact" REAL NOT NULL DEFAULT 0""", ct);
+                if (fixtureColumns.Count > 0 && !fixtureColumns.Contains("UnavailableAwayAttackImpact"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "FixtureContexts" ADD COLUMN "UnavailableAwayAttackImpact" REAL NOT NULL DEFAULT 0""", ct);
+                if (fixtureColumns.Count > 0 && !fixtureColumns.Contains("UnavailableAwayDefenseImpact"))
+                    await ExecuteSchemaAsync("""ALTER TABLE "FixtureContexts" ADD COLUMN "UnavailableAwayDefenseImpact" REAL NOT NULL DEFAULT 0""", ct);
             }
             finally
             {

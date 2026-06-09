@@ -34,7 +34,23 @@ namespace Oloraculo.Web.Predictors
 
             if (context.FixtureContext is { } ctx)
             {
-                if (ctx.UnavailableHomePlayers > 0 || ctx.UnavailableAwayPlayers > 0)
+                var hasRoleAwareImpact =
+                    ctx.UnavailableHomeAttackImpact > 0 ||
+                    ctx.UnavailableHomeDefenseImpact > 0 ||
+                    ctx.UnavailableAwayAttackImpact > 0 ||
+                    ctx.UnavailableAwayDefenseImpact > 0;
+
+                if (hasRoleAwareImpact)
+                {
+                    homeGoals *= Math.Max(0.82, 1.0 - ctx.UnavailableHomeAttackImpact);
+                    awayGoals *= Math.Max(0.82, 1.0 - ctx.UnavailableAwayAttackImpact);
+                    homeGoals *= 1.0 + ctx.UnavailableAwayDefenseImpact;
+                    awayGoals *= 1.0 + ctx.UnavailableHomeDefenseImpact;
+                    usedFeatures.Add("Disponibilidad de jugadores");
+                    drivers.Add($"Impacto por rol aplicado. Equipo A: ataque -{ctx.UnavailableHomeAttackImpact:P1}, defensa -{ctx.UnavailableHomeDefenseImpact:P1}; equipo B: ataque -{ctx.UnavailableAwayAttackImpact:P1}, defensa -{ctx.UnavailableAwayDefenseImpact:P1}.");
+                    appliedContext = true;
+                }
+                else if (ctx.UnavailableHomePlayers > 0 || ctx.UnavailableAwayPlayers > 0)
                 {
                     homeGoals *= Math.Max(0.86, 1.0 - ctx.UnavailableHomePlayers * 0.02);
                     awayGoals *= Math.Max(0.86, 1.0 - ctx.UnavailableAwayPlayers * 0.02);

@@ -16,6 +16,10 @@ namespace Oloraculo.Web.Models
         public string SupportingQuote { get; set; } = "";
         public DateTimeOffset? ObservedDate { get; set; }
         public bool AffectsPrediction { get; set; }
+        public long? ApiFootballPlayerId { get; set; }
+        public string Position { get; set; } = "Unknown";
+        public string PositionSource { get; set; } = "Unknown";
+        public DateTimeOffset? PositionMatchedAt { get; set; }
         public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     }
 }

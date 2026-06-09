@@ -7,6 +7,7 @@ using Oloraculo.Web;
 using Oloraculo.Web.DAL;
 using Oloraculo.Web.Helpers;
 using Oloraculo.Web.Models;
+using Oloraculo.Web.Models.ApiFootballModels;
 using Oloraculo.Web.Models.CsvModels;
 using Oloraculo.Web.Predictors;
 using Oloraculo.Web.Probability;
@@ -527,6 +528,205 @@ public class CoreTests
     }
 
     [Fact]
+    public void ApiFootball_SquadResponseParsesPlayerPositions()
+    {
+        var parsed = JsonSerializer.Deserialize<ApiSquadResponse>("""
+            {
+              "response": [{
+                "team": { "id": 2, "name": "France" },
+                "players": [
+                  { "id": 278, "name": "Kylian Mbappé", "position": "Attacker" },
+                  { "id": 22090, "name": "W. Saliba", "position": "Defender" }
+                ]
+              }]
+            }
+            """, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(parsed);
+        Assert.Equal("Attacker", parsed.Response[0].Players[0].Position);
+        Assert.Equal("Defender", parsed.Response[0].Players[1].Position);
+    }
+
+    [Fact]
+    public void ApiFootball_PlayerRoleMatchingHandlesAccentsAndInitialLastNames()
+    {
+        var candidates = new[]
+        {
+            new PlayerRoleCandidate(278, "Kylian Mbappé", "Attacker", "test"),
+            new PlayerRoleCandidate(22090, "William Saliba", "Defender", "test")
+        };
+
+        var accent = ApiFootballService.MatchPlayerRole("Kylian Mbappe", candidates);
+        var initial = ApiFootballService.MatchPlayerRole("W. Saliba", candidates);
+
+        Assert.Equal(278, accent?.Id);
+        Assert.Equal("Attacker", accent?.Position);
+        Assert.Equal(22090, initial?.Id);
+        Assert.Equal("Defender", initial?.Position);
+    }
+
+    [Fact]
+    public void AvailabilityNews_PositionImpactsUseUnknownFallbackAndClampTotals()
+    {
+        Assert.Equal((0.020, 0.000), AvailabilityNewsService.ImpactForPosition("Unknown"));
+
+        var clamped = AvailabilityNewsService.SumImpacts(Enumerable.Repeat("Goalkeeper", 10));
+
+        Assert.Equal(0.0, clamped.Attack);
+        Assert.Equal(0.18, clamped.Defense);
+    }
+
+    [Fact]
+    public void ContextModel_AttackerAbsenceReducesOwnXgMoreThanDefenderAbsence()
+    {
+        var goal = new GoalModel(
+        [
+            Result("a", "b", 2, 0),
+            Result("a", "b", 1, 0),
+            Result("b", "a", 1, 2)
+        ]);
+        var attackerContext = TestContext(fixtureContext: new FixtureContext
+        {
+            FixtureId = "test",
+            UnavailableHomePlayers = 1,
+            UnavailableHomeAttackImpact = AvailabilityNewsService.ImpactForPosition("Attacker").Attack,
+            UnavailableHomeDefenseImpact = AvailabilityNewsService.ImpactForPosition("Attacker").Defense
+        });
+        var defenderContext = TestContext(fixtureContext: new FixtureContext
+        {
+            FixtureId = "test",
+            UnavailableHomePlayers = 1,
+            UnavailableHomeAttackImpact = AvailabilityNewsService.ImpactForPosition("Defender").Attack,
+            UnavailableHomeDefenseImpact = AvailabilityNewsService.ImpactForPosition("Defender").Defense
+        });
+
+        var attackerPrediction = new GoalPlusRecentContextModel(goal).Predict(attackerContext);
+        var defenderPrediction = new GoalPlusRecentContextModel(goal).Predict(defenderContext);
+
+        Assert.True(attackerPrediction.ExpectedHomeGoals < defenderPrediction.ExpectedHomeGoals);
+    }
+
+    [Fact]
+    public void ContextModel_DefenderAbsenceRaisesOpponentXg()
+    {
+        var goal = new GoalModel(
+        [
+            Result("a", "b", 2, 0),
+            Result("a", "b", 1, 0),
+            Result("b", "a", 1, 2)
+        ]);
+        var baseline = new GoalPlusRecentContextModel(goal).Predict(TestContext());
+        var defenderContext = TestContext(fixtureContext: new FixtureContext
+        {
+            FixtureId = "test",
+            UnavailableHomePlayers = 1,
+            UnavailableHomeAttackImpact = AvailabilityNewsService.ImpactForPosition("Defender").Attack,
+            UnavailableHomeDefenseImpact = AvailabilityNewsService.ImpactForPosition("Defender").Defense
+        });
+
+        var prediction = new GoalPlusRecentContextModel(goal).Predict(defenderContext);
+
+        Assert.True(prediction.ExpectedAwayGoals > baseline.ExpectedAwayGoals);
+    }
+
+    [Fact]
+    public async Task ApiFootball_RoleEnrichmentUpdatesClaimsWithoutDeletingEvidence()
+    {
+        await using var db = await NewDb();
+        db.AvailabilityClaims.Add(new AvailabilityClaim
+        {
+            Player = "Kylian Mbappe",
+            PlayerKey = AvailabilityNewsService.NormalizePlayerKey("Kylian Mbappe"),
+            TeamId = "france",
+            TeamName = "France",
+            Status = AvailabilityClaimStatus.ConfirmedOutInjury,
+            EvidenceLevel = AvailabilityEvidenceLevel.Official,
+            SourceUrl = "https://source.test",
+            SupportingQuote = "France confirmed Kylian Mbappe will miss the match.",
+            AffectsPrediction = true
+        });
+        await db.SaveChangesAsync();
+        var handler = new FakeHttpMessageHandler(new Dictionary<string, string>
+        {
+            ["https://api.test/teams?league=1&season=2026"] = """
+                {"response":[{"team":{"id":2,"name":"France"}}]}
+                """,
+            ["https://api.test/players/squads?team=2"] = """
+                {"response":[{"team":{"id":2,"name":"France"},"players":[{"id":278,"name":"Kylian Mbappé","position":"Attacker"}]}]}
+                """
+        });
+        var api = ApiService(db, handler);
+
+        var report = await api.EnrichAvailabilityRolesAsync();
+        var claim = Assert.Single(await db.AvailabilityClaims.ToListAsync());
+
+        Assert.Equal(1, report.RoleMatchedClaims);
+        Assert.Equal(278, claim.ApiFootballPlayerId);
+        Assert.Equal("Attacker", claim.Position);
+        Assert.Equal("France confirmed Kylian Mbappe will miss the match.", claim.SupportingQuote);
+    }
+
+    [Fact]
+    public async Task ApiFootball_SquadFailureLeavesClaimsUnknown()
+    {
+        await using var db = await NewDb();
+        db.AvailabilityClaims.Add(new AvailabilityClaim
+        {
+            Player = "Mystery Player",
+            PlayerKey = AvailabilityNewsService.NormalizePlayerKey("Mystery Player"),
+            TeamId = "france",
+            TeamName = "France",
+            Status = AvailabilityClaimStatus.ConfirmedOutInjury,
+            EvidenceLevel = AvailabilityEvidenceLevel.Official,
+            SourceUrl = "https://source.test",
+            AffectsPrediction = true
+        });
+        await db.SaveChangesAsync();
+        var handler = new FakeHttpMessageHandler(new Dictionary<string, string>
+        {
+            ["https://api.test/teams?league=1&season=2026"] = """
+                {"response":[{"team":{"id":2,"name":"France"}}]}
+                """
+        });
+        var api = ApiService(db, handler);
+
+        var report = await api.EnrichAvailabilityRolesAsync();
+        var claim = Assert.Single(await db.AvailabilityClaims.ToListAsync());
+
+        Assert.Equal(1, report.RoleUnknownClaims);
+        Assert.Equal("Unknown", claim.Position);
+    }
+
+    [Fact]
+    public async Task AvailabilityNews_RoleAwareFixtureContextStoresImpacts()
+    {
+        await using var db = await NewDb();
+        db.Teams.AddRange(new Team { Id = "france", Name = "France" }, new Team { Id = "argentina", Name = "Argentina" });
+        db.Fixtures.Add(new Fixture { Id = "f1", Group = "A", HomeTeamId = "france", AwayTeamId = "argentina" });
+        db.AvailabilityClaims.Add(new AvailabilityClaim
+        {
+            Player = "Kylian Mbappe",
+            PlayerKey = AvailabilityNewsService.NormalizePlayerKey("Kylian Mbappe"),
+            TeamId = "france",
+            TeamName = "France",
+            Status = AvailabilityClaimStatus.ConfirmedOutInjury,
+            EvidenceLevel = AvailabilityEvidenceLevel.Official,
+            SourceUrl = "https://source.test",
+            AffectsPrediction = true,
+            Position = "Attacker"
+        });
+        await db.SaveChangesAsync();
+        var service = new AvailabilityNewsService(new HttpClient(new FakeHttpMessageHandler(new Dictionary<string, string>())), db, AvailabilityOptions([]));
+
+        await service.RefreshFixtureContextAsync("f1");
+        var context = await db.FixtureContexts.FindAsync("f1");
+
+        Assert.NotNull(context);
+        Assert.Equal(0.035, context.UnavailableHomeAttackImpact, 3);
+        Assert.Equal(0.003, context.UnavailableHomeDefenseImpact, 3);
+    }
+
+    [Fact]
     public async Task CsvImport_CreatesTeamsGroupsFixturesRatingsAndResults()
     {
         await using var db = await NewDb();
@@ -610,6 +810,80 @@ public class CoreTests
 
         Assert.Equal("tournament", snapshot.Kind);
         Assert.Equal(0, snapshot.AwayWin);
+    }
+
+    [Fact]
+    public async Task SnapshotService_ListsTournamentSnapshotsNewestFirstAndExcludesMatches()
+    {
+        await using var db = await NewDb();
+        var service = new SnapshotService(db);
+        var oldSnapshot = await service.SaveTournamentAsync(TournamentProjection("old-hash", 100, DateTimeOffset.Parse("2026-01-01T00:00:00Z")));
+        db.Snapshots.Add(new PredictionSnapshot
+        {
+            Kind = "match",
+            FixtureId = "f1",
+            ModelName = "Match",
+            CreatedAt = DateTimeOffset.Parse("2026-01-03T00:00:00Z"),
+            InputSummaryHash = "match-hash",
+            PayloadJson = "{}",
+            Explanation = "match",
+            HomeWin = .4,
+            Draw = .3,
+            AwayWin = .3
+        });
+        await db.SaveChangesAsync();
+        var newSnapshot = await service.SaveTournamentAsync(TournamentProjection("new-hash", 200, DateTimeOffset.Parse("2026-01-02T00:00:00Z")));
+
+        var snapshots = await service.TournamentSnapshotsAsync();
+
+        Assert.Equal([newSnapshot.Id, oldSnapshot.Id], snapshots.Select(s => s.Id));
+        Assert.Equal(200, snapshots[0].Simulations);
+        Assert.All(snapshots, s => Assert.True(s.IsValid));
+    }
+
+    [Fact]
+    public async Task SnapshotService_LoadsTournamentSnapshotPayload()
+    {
+        await using var db = await NewDb();
+        var service = new SnapshotService(db);
+        var snapshot = await service.SaveTournamentAsync(TournamentProjection("hash", 123, DateTimeOffset.Parse("2026-01-01T00:00:00Z")));
+
+        var result = await service.LoadTournamentSnapshotAsync(snapshot.Id);
+
+        Assert.True(result.IsValid);
+        Assert.NotNull(result.Projection);
+        Assert.Equal(123, result.Projection.Simulations);
+        Assert.Equal("argentina", result.Projection.Teams.Single().TeamId);
+        Assert.Equal(.42, result.Projection.Teams.Single().WinTournament);
+    }
+
+    [Fact]
+    public async Task SnapshotService_SurfacesMalformedTournamentSnapshotPayloads()
+    {
+        await using var db = await NewDb();
+        db.Snapshots.Add(new PredictionSnapshot
+        {
+            Kind = "tournament",
+            ModelName = "Final",
+            CreatedAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z"),
+            InputSummaryHash = "bad-hash",
+            PayloadJson = "not json",
+            Explanation = "bad",
+            HomeWin = 0,
+            Draw = 0,
+            AwayWin = 0
+        });
+        await db.SaveChangesAsync();
+        var service = new SnapshotService(db);
+
+        var snapshots = await service.TournamentSnapshotsAsync();
+        var result = await service.LoadTournamentSnapshotAsync(snapshots.Single().Id);
+
+        Assert.False(snapshots.Single().IsValid);
+        Assert.Null(snapshots.Single().Simulations);
+        Assert.False(result.IsValid);
+        Assert.Null(result.Projection);
+        Assert.False(string.IsNullOrWhiteSpace(result.Error));
     }
 
     [Fact]
@@ -707,6 +981,26 @@ public class CoreTests
             AvailabilityRequireCrossCheck = true
         });
 
+    private static ApiFootballService ApiService(OloraculoDbContext db, HttpMessageHandler handler)
+    {
+        var options = Options.Create(new OloraculoConfig
+        {
+            ApiFootballApiKey = "test-key",
+            ApiFootballBaseUrl = "https://api.test/",
+            ApiFootballLeagueId = 1,
+            ApiFootballSeason = 2026,
+            OpenRouterApiKey = "test-key",
+            OpenRouterBaseUrl = "https://openrouter.test/",
+            AvailabilitySourceUrls = []
+        });
+        var availability = new AvailabilityNewsService(
+            new HttpClient(new FakeHttpMessageHandler(new Dictionary<string, string>())) { BaseAddress = new Uri("https://openrouter.test/") },
+            db,
+            options);
+
+        return new ApiFootballService(new HttpClient(handler) { BaseAddress = new Uri("https://api.test/") }, db, options, availability);
+    }
+
     private static async Task<OloraculoDbContext> ImportedDb()
     {
         var db = await NewDb();
@@ -747,6 +1041,28 @@ public class CoreTests
         Tournament = "test",
         Neutral = true,
         Source = "test"
+    };
+
+    private static TournamentProjection TournamentProjection(string hash, int simulations, DateTimeOffset generatedAt) => new()
+    {
+        GeneratedAt = generatedAt,
+        Simulations = simulations,
+        ModelName = "Final",
+        InputSummaryHash = hash,
+        Teams =
+        [
+            new TeamTournamentProbability
+            {
+                TeamId = "argentina",
+                Group = "A",
+                Qualify = .8,
+                ReachRoundOf16 = .7,
+                ReachQuarterFinal = .6,
+                ReachSemiFinal = .5,
+                ReachFinal = .45,
+                WinTournament = .42
+            }
+        ]
     };
 
     private static MatchPrediction Prediction(

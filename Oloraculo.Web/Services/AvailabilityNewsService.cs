@@ -79,6 +79,7 @@ namespace Oloraculo.Web.Services
             await RecomputePredictionFlagsAsync(ct);
             var contexts = await RefreshAllFixtureContextsAsync(ct);
             var affecting = await _db.AvailabilityClaims.CountAsync(c => c.AffectsPrediction, ct);
+            var matched = await _db.AvailabilityClaims.CountAsync(c => c.AffectsPrediction && c.Position != "Unknown", ct);
 
             return new AvailabilityRefreshReport
             {
@@ -87,6 +88,8 @@ namespace Oloraculo.Web.Services
                 SourcesSkipped = skipped,
                 ClaimsSaved = saved,
                 ClaimsAffectingPredictions = affecting,
+                RoleMatchedClaims = matched,
+                RoleUnknownClaims = affecting - matched,
                 ContextRowsUpdated = contexts,
                 Notes = notes,
                 Errors = errors
@@ -96,11 +99,15 @@ namespace Oloraculo.Web.Services
         public async Task<AvailabilityRefreshReport> RefreshFixtureContextAsync(string fixtureId, CancellationToken ct = default)
         {
             var updated = await RefreshFixtureContextCountsAsync(fixtureId, [], ct);
+            var affecting = await _db.AvailabilityClaims.CountAsync(c => c.AffectsPrediction, ct);
+            var matched = await _db.AvailabilityClaims.CountAsync(c => c.AffectsPrediction && c.Position != "Unknown", ct);
             return new AvailabilityRefreshReport
             {
                 IsConfigured = IsConfigured,
                 ContextRowsUpdated = updated ? 1 : 0,
-                ClaimsAffectingPredictions = await _db.AvailabilityClaims.CountAsync(c => c.AffectsPrediction, ct),
+                ClaimsAffectingPredictions = affecting,
+                RoleMatchedClaims = matched,
+                RoleUnknownClaims = affecting - matched,
                 Notes = updated ? ["Contexto de disponibilidad actualizado desde noticias."] : ["No se encontró el partido seleccionado."]
             };
         }
@@ -131,7 +138,7 @@ namespace Oloraculo.Web.Services
                 .ToListAsync(ct);
         }
 
-        public async Task<bool> RefreshFixtureContextCountsAsync(string fixtureId, IEnumerable<(string TeamId, string PlayerKey)> externalUnavailablePlayers, CancellationToken ct = default)
+        public async Task<bool> RefreshFixtureContextCountsAsync(string fixtureId, IEnumerable<UnavailablePlayerRole> externalUnavailablePlayers, CancellationToken ct = default)
         {
             var fixture = await _db.Fixtures.FindAsync([fixtureId], ct);
             if (fixture is null)
@@ -139,18 +146,29 @@ namespace Oloraculo.Web.Services
 
             var newsClaims = await AffectingClaimsForTeamsAsync([fixture.HomeTeamId, fixture.AwayTeamId], ct);
             var unavailable = new HashSet<string>(StringComparer.Ordinal);
+            var unavailableRoles = new Dictionary<string, string>(StringComparer.Ordinal);
 
             foreach (var player in externalUnavailablePlayers)
             {
                 if (player.TeamId == fixture.HomeTeamId || player.TeamId == fixture.AwayTeamId)
-                    unavailable.Add($"{player.TeamId}|{player.PlayerKey}");
+                {
+                    var key = $"{player.TeamId}|{player.PlayerKey}";
+                    unavailable.Add(key);
+                    unavailableRoles[key] = NormalizePosition(player.Position);
+                }
             }
 
             foreach (var claim in newsClaims)
-                unavailable.Add($"{claim.TeamId}|{claim.PlayerKey}");
+            {
+                var key = $"{claim.TeamId}|{claim.PlayerKey}";
+                unavailable.Add(key);
+                unavailableRoles[key] = NormalizePosition(claim.Position);
+            }
 
             var homeUnavailable = unavailable.Count(k => k.StartsWith(fixture.HomeTeamId + "|", StringComparison.Ordinal));
             var awayUnavailable = unavailable.Count(k => k.StartsWith(fixture.AwayTeamId + "|", StringComparison.Ordinal));
+            var homeImpacts = SumImpacts(unavailableRoles.Where(p => p.Key.StartsWith(fixture.HomeTeamId + "|", StringComparison.Ordinal)).Select(p => p.Value));
+            var awayImpacts = SumImpacts(unavailableRoles.Where(p => p.Key.StartsWith(fixture.AwayTeamId + "|", StringComparison.Ordinal)).Select(p => p.Value));
             var context = await _db.FixtureContexts.FindAsync([fixtureId], ct);
             if (context is null)
             {
@@ -162,8 +180,12 @@ namespace Oloraculo.Web.Services
             var newsAway = newsClaims.Count(c => c.TeamId == fixture.AwayTeamId);
             context.UnavailableHomePlayers = homeUnavailable;
             context.UnavailableAwayPlayers = awayUnavailable;
+            context.UnavailableHomeAttackImpact = homeImpacts.Attack;
+            context.UnavailableHomeDefenseImpact = homeImpacts.Defense;
+            context.UnavailableAwayAttackImpact = awayImpacts.Attack;
+            context.UnavailableAwayDefenseImpact = awayImpacts.Defense;
             context.HasAvailabilityNews = newsHome + newsAway > 0;
-            context.Notes = AppendAvailabilityNote(context.Notes, newsHome, newsAway);
+            context.Notes = AppendAvailabilityNote(context.Notes, newsHome, newsAway, newsClaims.Count(c => c.Position != "Unknown"), newsClaims.Count(c => c.Position == "Unknown"));
             context.UpdatedAt = DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync(ct);
             return true;
@@ -240,6 +262,45 @@ namespace Oloraculo.Web.Services
 
         public static string NormalizePlayerKey(string player) =>
             Regex.Replace(player.ToLowerInvariant().Normalize(NormalizationForm.FormD), @"[^\p{Ll}\p{Nd}]+", "-").Trim('-');
+
+        public static string NormalizePosition(string? position)
+        {
+            var value = (position ?? "").Trim();
+            if (value.Equals("Goalkeeper", StringComparison.OrdinalIgnoreCase))
+                return "Goalkeeper";
+            if (value.Equals("Defender", StringComparison.OrdinalIgnoreCase))
+                return "Defender";
+            if (value.Equals("Midfielder", StringComparison.OrdinalIgnoreCase))
+                return "Midfielder";
+            if (value.Equals("Attacker", StringComparison.OrdinalIgnoreCase) || value.Equals("Forward", StringComparison.OrdinalIgnoreCase))
+                return "Attacker";
+
+            return "Unknown";
+        }
+
+        public static (double Attack, double Defense) ImpactForPosition(string? position) =>
+            NormalizePosition(position) switch
+            {
+                "Attacker" => (0.035, 0.003),
+                "Midfielder" => (0.015, 0.010),
+                "Defender" => (0.004, 0.025),
+                "Goalkeeper" => (0.000, 0.050),
+                _ => (0.020, 0.000)
+            };
+
+        public static (double Attack, double Defense) SumImpacts(IEnumerable<string?> positions)
+        {
+            var attack = 0.0;
+            var defense = 0.0;
+            foreach (var position in positions)
+            {
+                var impact = ImpactForPosition(position);
+                attack += impact.Attack;
+                defense += impact.Defense;
+            }
+
+            return (Math.Min(0.18, attack), Math.Min(0.18, defense));
+        }
 
         private async Task<SourceFetchResult> FetchSourceAsync(string url, CancellationToken ct)
         {
@@ -357,10 +418,10 @@ namespace Oloraculo.Web.Services
             return updated;
         }
 
-        private static string AppendAvailabilityNote(string existing, int home, int away)
+        private static string AppendAvailabilityNote(string existing, int home, int away, int matched, int unknown)
         {
             var prefix = string.IsNullOrWhiteSpace(existing) ? "" : existing.Split(" Noticias:")[0].Trim();
-            var note = $"Noticias: bajas confirmadas equipo A {home}, equipo B {away}.";
+            var note = $"Noticias: bajas confirmadas equipo A {home}, equipo B {away}; roles matcheados {matched}; roles desconocidos {unknown}.";
             return string.IsNullOrWhiteSpace(prefix) ? note : $"{prefix} {note}";
         }
 
@@ -444,4 +505,6 @@ namespace Oloraculo.Web.Services
                 new(url, statusCode, title, publisher, null, error);
         }
     }
+
+    public sealed record UnavailablePlayerRole(string TeamId, string PlayerKey, string Position);
 }

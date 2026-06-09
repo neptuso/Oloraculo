@@ -16,6 +16,7 @@
     <MudPaper Class="surface-card" Elevation="0">
         <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="action-row">
             <BusyButton Text="Correr simulación" BusyText="Simulando torneo" IsBusy="_busy" Icon="@Icons.Material.Filled.PlayArrow" OnClick="Run" />
+            <MudButton Href="tournament/snapshots" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.History">Ver snapshots</MudButton>
             <MudSpacer />
             <MudText Typo="Typo.body2" Color="Color.Secondary">@Options.Value.SimulationCount.ToString("N0") simulaciones configuradas</MudText>
         </MudStack>
