@@ -19,6 +19,23 @@ namespace Oloraculo.Web.Services
 
         public async Task<PredictionSnapshot> SaveMatchAsync(MatchPrediction prediction, CancellationToken ct = default)
         {
+            var snapshot = CreateMatchSnapshot(prediction);
+            _db.Snapshots.Add(snapshot);
+            await _db.SaveChangesAsync(ct);
+            return snapshot;
+        }
+
+        public async Task<IReadOnlyList<PredictionSnapshot>> SaveMatchesAsync(IEnumerable<MatchPrediction> predictions, CancellationToken ct = default)
+        {
+            var snapshots = predictions.Select(CreateMatchSnapshot).ToList();
+            _db.Snapshots.AddRange(snapshots);
+            await _db.SaveChangesAsync(ct);
+            return snapshots;
+        }
+
+        private static PredictionSnapshot CreateMatchSnapshot(MatchPrediction prediction)
+        {
+            var now = DateTimeOffset.UtcNow;
             var payload = JsonSerializer.Serialize(new
             {
                 prediction.PredictorName,
@@ -31,22 +48,19 @@ namespace Oloraculo.Web.Services
                 Sources = prediction.Sources.Select(s => s.ToString())
             }, JsonOptions);
 
-            var snapshot = new PredictionSnapshot
+            return new PredictionSnapshot
             {
                 Kind = "match",
                 FixtureId = prediction.FixtureId,
                 ModelName = prediction.PredictorName,
-                CreatedAt = DateTimeOffset.UtcNow,
-                InputSummaryHash = CryptoUtil.GetSha256($"{prediction.FixtureId}|{DateTimeOffset.UtcNow:yyyyMMddHH}"),
+                CreatedAt = now,
+                InputSummaryHash = CryptoUtil.GetSha256($"{prediction.FixtureId}|{now:yyyyMMddHH}"),
                 PayloadJson = payload,
                 Explanation = prediction.Explanation,
                 HomeWin = prediction.Outcome.HomeWin,
                 Draw = prediction.Outcome.Draw,
                 AwayWin = prediction.Outcome.AwayWin
             };
-            _db.Snapshots.Add(snapshot);
-            await _db.SaveChangesAsync(ct);
-            return snapshot;
         }
 
         public async Task<PredictionSnapshot> SaveTournamentAsync(TournamentProjection projection, CancellationToken ct = default)

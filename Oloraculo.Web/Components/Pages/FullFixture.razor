@@ -1,0 +1,296 @@
+@page "/fixture"
+@rendermode InteractiveServer
+@inject OloraculoDbContext Db
+@inject PredictionService Predictor
+@inject SnapshotService Snapshots
+@inject ISnackbar Snackbar
+
+<PageTitle>Fixture completo</PageTitle>
+
+<MudStack Spacing="3">
+    <div class="page-head">
+        <MudText Typo="Typo.h3">Fixture completo</MudText>
+        <MudText Typo="Typo.body1" Color="Color.Secondary">Predicción masiva de todos los partidos de la fase de grupos.</MudText>
+    </div>
+
+    <MudPaper Class="surface-card" Elevation="0">
+        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="action-row fixture-action-row">
+            <BusyButton Text="Predecir fixture completo"
+                        BusyText="Prediciendo fixture"
+                        IsBusy="_predicting"
+                        Disabled="@(!_loaded || _fixtures.Count == 0 || _saving)"
+                        Icon="@Icons.Material.Filled.AutoAwesome"
+                        OnClick="PredictAll" />
+            <BusyButton Text="Guardar snapshots"
+                        BusyText="Guardando snapshots"
+                        IsBusy="_saving"
+                        Disabled="@(_predictions.Count == 0 || _predicting)"
+                        Variant="Variant.Outlined"
+                        Icon="@Icons.Material.Filled.Save"
+                        OnClick="SaveAll" />
+            <MudSpacer />
+            <MudText Typo="Typo.body2" Color="Color.Secondary">@StatusText</MudText>
+        </MudStack>
+        @if (_predicting || _saving)
+        {
+            <MudProgressLinear Class="inline-progress" Color="Color.Primary" Indeterminate="true" />
+        }
+    </MudPaper>
+
+    @if (!string.IsNullOrWhiteSpace(_error))
+    {
+        <MudAlert Severity="Severity.Error" Variant="Variant.Outlined">@_error</MudAlert>
+    }
+
+    @if (_predictionErrors.Count > 0)
+    {
+        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined">
+            @_predictionErrors.Count partido(s) no pudieron predecirse. Los demás resultados disponibles se mantienen en la grilla.
+        </MudAlert>
+    }
+
+    @if (!_loaded)
+    {
+        <MudGrid Spacing="2">
+            @for (var i = 0; i < 6; i++)
+            {
+                <MudItem xs="12" md="6" xl="4">
+                    <MudPaper Class="surface-card fixture-group-card" Elevation="0">
+                        <MudSkeleton Height="28px" Width="35%" />
+                        <MudSkeleton Height="54px" Class="skeleton-row" />
+                        <MudSkeleton Height="54px" Class="skeleton-row" />
+                        <MudSkeleton Height="54px" Class="skeleton-row" />
+                    </MudPaper>
+                </MudItem>
+            }
+        </MudGrid>
+    }
+    else if (_fixtures.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No hay partidos de grupo cargados todavía.</MudAlert>
+    }
+    else
+    {
+        <div class="fixture-board">
+            @foreach (var group in GroupedFixtures())
+            {
+                <MudPaper Class="surface-card fixture-group-card" Elevation="0">
+                    <div class="fixture-group-head">
+                        <MudText Typo="Typo.h6">Grupo @group.Key</MudText>
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Secondary">@group.Count() partidos</MudChip>
+                    </div>
+
+                    <div class="fixture-card-list">
+                        @foreach (var fixture in OrderedFixtures(group))
+                        {
+                            var hasPrediction = _predictions.TryGetValue(fixture.Id, out var prediction);
+                            var hasError = _predictionErrors.TryGetValue(fixture.Id, out var predictionError);
+
+                            <div class="fixture-match-card">
+                                <div class="fixture-match-meta">
+                                    <span>@DateText(fixture)</span>
+                                    @if (fixture.IsPlayed && fixture.HomeGoals.HasValue && fixture.AwayGoals.HasValue)
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Outlined">Final</MudChip>
+                                    }
+                                </div>
+
+                                <div class="fixture-match-line">
+                                    <div class="fixture-team fixture-team-home">
+                                        <TeamLabel TeamId="@fixture.HomeTeamId" Name="@Name(fixture.HomeTeamId)" Compact="true" />
+                                    </div>
+                                    <div class="fixture-score-slot">@ScoreText(fixture, prediction)</div>
+                                    <div class="fixture-team fixture-team-away">
+                                        <TeamLabel TeamId="@fixture.AwayTeamId" Name="@Name(fixture.AwayTeamId)" Compact="true" />
+                                    </div>
+                                </div>
+
+                                @if (hasPrediction && prediction is not null)
+                                {
+                                    <div class="fixture-prob-mini" role="img" aria-label="@ProbabilityLabel(prediction)">
+                                        <span class="fixture-prob-segment home" style="@SegmentStyle(prediction.BestPrediction.Outcome.HomeWin)"></span>
+                                        <span class="fixture-prob-segment draw" style="@SegmentStyle(prediction.BestPrediction.Outcome.Draw)"></span>
+                                        <span class="fixture-prob-segment away" style="@SegmentStyle(prediction.BestPrediction.Outcome.AwayWin)"></span>
+                                    </div>
+                                    <div class="fixture-prob-labels">
+                                        <span>@prediction.BestPrediction.Outcome.HomeWin.ToString("P0")</span>
+                                        <span>@prediction.BestPrediction.Outcome.Draw.ToString("P0")</span>
+                                        <span>@prediction.BestPrediction.Outcome.AwayWin.ToString("P0")</span>
+                                    </div>
+                                }
+                                else if (hasError)
+                                {
+                                    <MudTooltip Text="@predictionError">
+                                        <MudText Typo="Typo.caption" Color="Color.Warning">Predicción no disponible</MudText>
+                                    </MudTooltip>
+                                }
+                                else
+                                {
+                                    <MudText Typo="Typo.caption" Color="Color.Secondary">Pendiente de predicción</MudText>
+                                }
+                            </div>
+                        }
+                    </div>
+                </MudPaper>
+            }
+        </div>
+    }
+</MudStack>
+
+@code {
+    private List<Fixture> _fixtures = [];
+    private Dictionary<string, string> _names = [];
+    private Dictionary<string, MatchPredictionResult> _predictions = new(StringComparer.Ordinal);
+    private Dictionary<string, string> _predictionErrors = new(StringComparer.Ordinal);
+    private bool _loaded;
+    private bool _predicting;
+    private bool _saving;
+    private int _savedCount;
+    private DateTimeOffset? _predictedAt;
+    private string _error = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadFixtures();
+        _names = await Db.Teams.AsNoTracking().ToDictionaryAsync(t => t.Id, t => t.Name);
+        _loaded = true;
+    }
+
+    private async Task PredictAll()
+    {
+        if (_fixtures.Count == 0)
+            return;
+
+        _predicting = true;
+        _error = "";
+        _savedCount = 0;
+        _predictedAt = null;
+        _predictions.Clear();
+        _predictionErrors.Clear();
+
+        try
+        {
+            var results = await Predictor.PredictFixturesAsync(OrderedFixtures(_fixtures));
+            _predictions = results.ToDictionary(result => result.Fixture.Id, StringComparer.Ordinal);
+            _predictedAt = DateTimeOffset.Now;
+            Snackbar.Add($"Fixture completo predicho: {_predictions.Count} partidos.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            Snackbar.Add("No se pudo completar la predicción masiva.", Severity.Error);
+            await PredictIndividually();
+        }
+        finally
+        {
+            _predicting = false;
+        }
+    }
+
+    private async Task PredictIndividually()
+    {
+        foreach (var fixture in OrderedFixtures(_fixtures))
+        {
+            try
+            {
+                var result = await Predictor.PredictAsync(fixture);
+                _predictions[fixture.Id] = result;
+            }
+            catch (Exception ex)
+            {
+                _predictionErrors[fixture.Id] = ex.Message;
+            }
+        }
+
+        if (_predictions.Count > 0)
+        {
+            _predictedAt = DateTimeOffset.Now;
+            Snackbar.Add($"Predicción parcial lista: {_predictions.Count} partidos.", Severity.Warning);
+        }
+    }
+
+    private async Task SaveAll()
+    {
+        if (_predictions.Count == 0)
+            return;
+
+        _saving = true;
+        _error = "";
+        try
+        {
+            var snapshots = await Snapshots.SaveMatchesAsync(OrderedPredictionResults().Select(result => result.BestPrediction));
+            _savedCount = snapshots.Count;
+            Snackbar.Add($"{_savedCount} snapshots guardados.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            Snackbar.Add("No se pudieron guardar los snapshots.", Severity.Error);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task LoadFixtures() =>
+        _fixtures = await Db.Fixtures.AsNoTracking().ToListAsync();
+
+    private IEnumerable<IGrouping<string, Fixture>> GroupedFixtures() =>
+        _fixtures.GroupBy(fixture => fixture.Group).OrderBy(group => group.Key);
+
+    private IEnumerable<Fixture> OrderedFixtures(IEnumerable<Fixture> fixtures) =>
+        fixtures
+            .OrderBy(fixture => fixture.KickoffUtc ?? DateTimeOffset.MaxValue)
+            .ThenBy(fixture => fixture.Group)
+            .ThenBy(fixture => Name(fixture.HomeTeamId))
+            .ThenBy(fixture => Name(fixture.AwayTeamId));
+
+    private IEnumerable<MatchPredictionResult> OrderedPredictionResults() =>
+        OrderedFixtures(_fixtures)
+            .Where(fixture => _predictions.ContainsKey(fixture.Id))
+            .Select(fixture => _predictions[fixture.Id]);
+
+    private string Name(string id) => _names.TryGetValue(id, out var name) ? name : id;
+
+    private string StatusText => _predictions.Count switch
+    {
+        > 0 when _savedCount > 0 => $"{_predictions.Count} predicciones | {_savedCount} snapshots guardados",
+        > 0 when _predictedAt is not null => $"{_predictions.Count} predicciones generadas {_predictedAt.Value:t}",
+        _ when _loaded => $"{_fixtures.Count} partidos de grupo",
+        _ => "Cargando fixture"
+    };
+
+    private string DateText(Fixture fixture)
+    {
+        if (fixture.KickoffUtc is null)
+            return "Fecha pendiente";
+
+        var local = fixture.KickoffUtc.Value.ToLocalTime();
+        return string.IsNullOrWhiteSpace(fixture.Venue)
+            ? local.ToString("dd MMM HH:mm")
+            : $"{local:dd MMM HH:mm} · {fixture.Venue}";
+    }
+
+    private static string ScoreText(Fixture fixture, MatchPredictionResult? prediction)
+    {
+        if (fixture.IsPlayed && fixture.HomeGoals.HasValue && fixture.AwayGoals.HasValue)
+            return $"{fixture.HomeGoals}-{fixture.AwayGoals}";
+
+        if (prediction?.BestPrediction.MostLikelyScore is { } score)
+            return $"{score.Home}-{score.Away}";
+
+        return prediction?.BestPrediction.Outcome.TopPick switch
+        {
+            "Home" => "1",
+            "Draw" => "X",
+            "Away" => "2",
+            _ => "-"
+        };
+    }
+
+    private static string SegmentStyle(double value) => $"width:{Math.Max(value * 100, 0):0.###}%";
+
+    private static string ProbabilityLabel(MatchPredictionResult prediction) =>
+        $"{prediction.HomeTeamName} {prediction.BestPrediction.Outcome.HomeWin:P0}, empate {prediction.BestPrediction.Outcome.Draw:P0}, {prediction.AwayTeamName} {prediction.BestPrediction.Outcome.AwayWin:P0}";
+}

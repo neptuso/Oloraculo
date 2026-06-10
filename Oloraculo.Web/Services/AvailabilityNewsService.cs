@@ -45,6 +45,9 @@ namespace Oloraculo.Web.Services
             var fetched = 0;
             var skipped = 0;
             var saved = 0;
+            var savedConfirmedOut = 0;
+            var savedDoubtful = 0;
+            var savedAvailable = 0;
 
             foreach (var url in _config.AvailabilitySourceUrls.Where(u => !string.IsNullOrWhiteSpace(u)).Distinct(StringComparer.OrdinalIgnoreCase))
             {
@@ -59,20 +62,38 @@ namespace Oloraculo.Web.Services
                 }
 
                 fetched++;
+                var deterministicClaims = ParseTrackerClaims(fetch.Text, fetch.Url, fetch.Publisher);
                 try
                 {
                     var json = await ClassifyAsync(fetch, ct);
-                    var claims = ParseClaimsFromJson(json, fetch.Url, fetch.Publisher)
-                        .Where(c => c.Status != AvailabilityClaimStatus.NotRelevant && c.Status != AvailabilityClaimStatus.Available)
+                    var llmClaims = ParseClaimsFromJson(json, fetch.Url, fetch.Publisher)
+                        .Where(c => c.Status != AvailabilityClaimStatus.NotRelevant)
                         .ToList();
+                    var claims = MergeClaims(deterministicClaims, llmClaims);
 
                     await ReplaceClaimsForSourceAsync(fetch.Url, claims, ct);
                     saved += claims.Count;
-                    notes.Add($"{fetch.Publisher ?? fetch.Url}: {claims.Count} reclamos de disponibilidad guardados.");
+                    savedConfirmedOut += claims.Count(c => IsConfirmedOut(c.Status));
+                    savedDoubtful += claims.Count(c => c.Status is AvailabilityClaimStatus.Doubtful or AvailabilityClaimStatus.FitnessConcern);
+                    savedAvailable += claims.Count(c => c.Status == AvailabilityClaimStatus.Available);
+                    notes.Add($"{fetch.Publisher ?? fetch.Url}: {claims.Count} reclamos de disponibilidad guardados ({deterministicClaims.Count} desde filas de tracker).");
                 }
                 catch (Exception ex)
                 {
-                    errors.Add($"{url}: OpenRouter no devolvió datos parseables ({ex.Message}). Se conservan reclamos previos de esa fuente.");
+                    if (deterministicClaims.Count > 0)
+                    {
+                        await ReplaceClaimsForSourceAsync(fetch.Url, deterministicClaims, ct);
+                        saved += deterministicClaims.Count;
+                        savedConfirmedOut += deterministicClaims.Count(c => IsConfirmedOut(c.Status));
+                        savedDoubtful += deterministicClaims.Count(c => c.Status is AvailabilityClaimStatus.Doubtful or AvailabilityClaimStatus.FitnessConcern);
+                        savedAvailable += deterministicClaims.Count(c => c.Status == AvailabilityClaimStatus.Available);
+                        notes.Add($"{fetch.Publisher ?? fetch.Url}: {deterministicClaims.Count} reclamos guardados desde filas de tracker.");
+                        errors.Add($"{url}: OpenRouter no devolvió datos parseables ({ex.Message}); se usaron filas de tracker parseadas localmente.");
+                    }
+                    else
+                    {
+                        errors.Add($"{url}: OpenRouter no devolvió datos parseables ({ex.Message}). Se conservan reclamos previos de esa fuente.");
+                    }
                 }
             }
 
@@ -87,6 +108,9 @@ namespace Oloraculo.Web.Services
                 SourcesFetched = fetched,
                 SourcesSkipped = skipped,
                 ClaimsSaved = saved,
+                ConfirmedOutClaims = savedConfirmedOut,
+                DoubtfulClaims = savedDoubtful,
+                AvailableClaims = savedAvailable,
                 ClaimsAffectingPredictions = affecting,
                 RoleMatchedClaims = matched,
                 RoleUnknownClaims = affecting - matched,
@@ -118,13 +142,15 @@ namespace Oloraculo.Web.Services
             if (fixture is null)
                 return [];
 
-            return await _db.AvailabilityClaims.AsNoTracking()
+            var claims = await _db.AvailabilityClaims.AsNoTracking()
                 .Where(c => c.TeamId == fixture.HomeTeamId || c.TeamId == fixture.AwayTeamId)
-                .OrderByDescending(c => c.AffectsPrediction)
+                .ToListAsync(ct);
+
+            return claims
+                .OrderBy(c => StatusSort(c))
                 .ThenBy(c => c.TeamName)
                 .ThenBy(c => c.Player)
-                .ThenBy(c => c.Status)
-                .ToListAsync(ct);
+                .ToList();
         }
 
         public async Task<IReadOnlyList<AvailabilityClaim>> AffectingClaimsForTeamsAsync(IEnumerable<string> teamIds, CancellationToken ct = default)
@@ -233,6 +259,54 @@ namespace Oloraculo.Web.Services
             return claims;
         }
 
+        public static IReadOnlyList<AvailabilityClaim> ParseTrackerClaims(string text, string sourceUrl, string? publisher = null)
+        {
+            var claims = new List<AvailabilityClaim>();
+            foreach (var rawLine in CandidateTrackerLines(text))
+            {
+                var line = CleanTrackerLine(rawLine);
+                var statusMatch = Regex.Match(line, @"(?<status>MAJOR\s+DOUBTS?|DOUBTS?|OUT|IN)\.?\s*$", RegexOptions.IgnoreCase);
+                if (!statusMatch.Success)
+                    continue;
+
+                var statusText = Regex.Replace(statusMatch.Groups["status"].Value, @"\s+", " ").Trim();
+                var status = TrackerStatus(statusText, line);
+                var withoutStatus = line[..statusMatch.Index].Trim().TrimEnd('.');
+                var separator = Regex.Match(withoutStatus, @"\s[-–—]\s");
+                if (!separator.Success)
+                    continue;
+
+                var subject = withoutStatus[..separator.Index].Trim();
+                var reason = withoutStatus[(separator.Index + separator.Length)..].Trim();
+                var teamComma = subject.LastIndexOf(',');
+                if (teamComma < 1 || teamComma >= subject.Length - 1)
+                    continue;
+
+                var playersText = subject[..teamComma].Trim();
+                var team = subject[(teamComma + 1)..].Trim();
+                foreach (var player in SplitTrackerPlayers(playersText))
+                {
+                    claims.Add(new AvailabilityClaim
+                    {
+                        Player = player,
+                        PlayerKey = NormalizePlayerKey(player),
+                        TeamName = TeamNameNormalizer.CanonicalName(team),
+                        TeamId = TeamNameNormalizer.ToId(team),
+                        Status = status,
+                        Reason = reason,
+                        Confidence = status == AvailabilityClaimStatus.Available || IsConfirmedOut(status) ? "high" : "medium",
+                        EvidenceLevel = AvailabilityEvidenceLevel.ReputableReported,
+                        SourceUrl = sourceUrl,
+                        Publisher = publisher,
+                        SupportingQuote = line,
+                        AffectsPrediction = false
+                    });
+                }
+            }
+
+            return claims;
+        }
+
         public static void ApplyPredictionFlags(IEnumerable<AvailabilityClaim> claims, bool requireCrossCheck)
         {
             foreach (var claim in claims)
@@ -250,7 +324,7 @@ namespace Oloraculo.Web.Services
                     .Select(c => PublisherKey(c))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .Count();
-                var shouldAffect = hasOfficial || !requireCrossCheck || reputableSourceCount >= 2;
+                var shouldAffect = hasOfficial || !requireCrossCheck || reputableSourceCount >= 1;
 
                 if (!shouldAffect)
                     continue;
@@ -300,6 +374,18 @@ namespace Oloraculo.Web.Services
             }
 
             return (Math.Min(0.18, attack), Math.Min(0.18, defense));
+        }
+
+        private static IReadOnlyList<AvailabilityClaim> MergeClaims(IReadOnlyList<AvailabilityClaim> deterministicClaims, IReadOnlyList<AvailabilityClaim> llmClaims)
+        {
+            var merged = new Dictionary<string, AvailabilityClaim>(StringComparer.Ordinal);
+            foreach (var claim in deterministicClaims.Where(c => c.Status != AvailabilityClaimStatus.NotRelevant))
+                merged[ClaimMergeKey(claim)] = claim;
+
+            foreach (var claim in llmClaims.Where(c => c.Status != AvailabilityClaimStatus.NotRelevant))
+                merged.TryAdd(ClaimMergeKey(claim), claim);
+
+            return merged.Values.ToList();
         }
 
         private async Task<SourceFetchResult> FetchSourceAsync(string url, CancellationToken ct)
@@ -431,6 +517,72 @@ namespace Oloraculo.Web.Services
                 or AvailabilityClaimStatus.ConfirmedOutSuspension
                 or AvailabilityClaimStatus.ConfirmedOutOther;
 
+        private static int StatusSort(AvailabilityClaim claim)
+        {
+            if (claim.AffectsPrediction)
+                return 0;
+
+            if (IsConfirmedOut(claim.Status))
+                return 1;
+
+            return claim.Status switch
+            {
+                AvailabilityClaimStatus.Doubtful or AvailabilityClaimStatus.FitnessConcern => 2,
+                AvailabilityClaimStatus.Rumor => 3,
+                AvailabilityClaimStatus.Available => 4,
+                _ => 5
+            };
+        }
+
+        private static string ClaimMergeKey(AvailabilityClaim claim) =>
+            $"{claim.SourceUrl}|{claim.TeamId}|{claim.PlayerKey}|{claim.Status}";
+
+        private static IEnumerable<string> CandidateTrackerLines(string text)
+        {
+            foreach (var line in Regex.Split(text ?? "", @"\r?\n+"))
+            {
+                var cleaned = CleanTrackerLine(line);
+                if (!string.IsNullOrWhiteSpace(cleaned))
+                    yield return cleaned;
+            }
+        }
+
+        private static string CleanTrackerLine(string line)
+        {
+            var cleaned = WebUtility.HtmlDecode(line ?? "");
+            cleaned = Regex.Replace(cleaned, @"^[\s\-*•]+", "");
+            return Regex.Replace(cleaned, @"\s+", " ").Trim();
+        }
+
+        private static AvailabilityClaimStatus TrackerStatus(string status, string line)
+        {
+            if (status.Equals("IN", StringComparison.OrdinalIgnoreCase))
+                return AvailabilityClaimStatus.Available;
+
+            if (Regex.IsMatch(status, @"DOUBT", RegexOptions.IgnoreCase))
+                return AvailabilityClaimStatus.Doubtful;
+
+            var lower = line.ToLowerInvariant();
+            if (lower.Contains("suspension") || lower.Contains("suspended"))
+                return AvailabilityClaimStatus.ConfirmedOutSuspension;
+            if (lower.Contains("illness") || lower.Contains("virus") || lower.Contains("sick"))
+                return AvailabilityClaimStatus.ConfirmedOutIllness;
+            if (lower.Contains("visa") || lower.Contains("personal reasons") || lower.Contains("disciplinary"))
+                return AvailabilityClaimStatus.ConfirmedOutOther;
+
+            return AvailabilityClaimStatus.ConfirmedOutInjury;
+        }
+
+        private static IEnumerable<string> SplitTrackerPlayers(string playersText)
+        {
+            var normalized = Regex.Replace(playersText, @"\s+and\s+", ", ", RegexOptions.IgnoreCase);
+            foreach (var player in normalized.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (player.Length > 1)
+                    yield return player;
+            }
+        }
+
         private static string PublisherKey(AvailabilityClaim claim) =>
             string.IsNullOrWhiteSpace(claim.Publisher) ? claim.SourceUrl : claim.Publisher;
 
@@ -462,9 +614,11 @@ namespace Oloraculo.Web.Services
         {
             var text = Regex.Replace(html, @"<script\b[^<]*(?:(?!</script>)<[^<]*)*</script>", " ", RegexOptions.IgnoreCase);
             text = Regex.Replace(text, @"<style\b[^<]*(?:(?!</style>)<[^<]*)*</style>", " ", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"</?(p|div|section|article|li|ul|ol|tr|table|tbody|thead|h[1-6]|br)\b[^>]*>", "\n", RegexOptions.IgnoreCase);
             text = Regex.Replace(text, @"<[^>]+>", " ");
             text = WebUtility.HtmlDecode(text);
-            return Regex.Replace(text, @"\s+", " ").Trim();
+            text = Regex.Replace(text, @"[ \t\f\v]+", " ");
+            return Regex.Replace(text, @"\s*\r?\n\s*", "\n").Trim();
         }
 
         private static bool LooksBotGated(string html)

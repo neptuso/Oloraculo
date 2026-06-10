@@ -12,7 +12,10 @@ namespace Oloraculo.Web.Helpers
         {
             ["usa"] = "United States",
             ["u.s.a"] = "United States",
+            ["usmnt"] = "United States",
             ["united states of america"] = "United States",
+            ["bosnia"] = "Bosnia and Herzegovina",
+            ["bosnia herzegovina"] = "Bosnia and Herzegovina",
             ["korea republic"] = "South Korea",
             ["republic of korea"] = "South Korea",
             ["south korea"] = "South Korea",

@@ -60,7 +60,7 @@
         @if (_availabilityReport is not null)
         {
             <MudAlert Class="mt-2" Severity="@(_availabilityReport.Errors.Count > 0 ? Severity.Warning : Severity.Info)" Variant="Variant.Outlined">
-                Fuentes leídas: @_availabilityReport.SourcesFetched. Fuentes omitidas: @_availabilityReport.SourcesSkipped. Reclamos guardados: @_availabilityReport.ClaimsSaved. Reclamos que afectan predicciones: @_availabilityReport.ClaimsAffectingPredictions. Roles matcheados: @_availabilityReport.RoleMatchedClaims. Roles desconocidos: @_availabilityReport.RoleUnknownClaims. Contextos actualizados: @_availabilityReport.ContextRowsUpdated. @string.Join(" ", _availabilityReport.Notes)
+                Fuentes leídas: @_availabilityReport.SourcesFetched. Fuentes omitidas: @_availabilityReport.SourcesSkipped. Reclamos guardados: @_availabilityReport.ClaimsSaved. Confirmados out: @_availabilityReport.ConfirmedOutClaims. Dudas: @_availabilityReport.DoubtfulClaims. Disponibles: @_availabilityReport.AvailableClaims. Reclamos que afectan predicciones: @_availabilityReport.ClaimsAffectingPredictions. Roles matcheados: @_availabilityReport.RoleMatchedClaims. Roles desconocidos: @_availabilityReport.RoleUnknownClaims. Contextos actualizados: @_availabilityReport.ContextRowsUpdated. @string.Join(" ", _availabilityReport.Notes)
             </MudAlert>
             @foreach (var error in _availabilityReport.Errors)
             {
